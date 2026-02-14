@@ -107,6 +107,40 @@ def validate_docx_file(file: UploadFile):
         logger.warning(f"File {file.filename} has unexpected content type: {file.content_type}")
 
 
+def validate_document_structure(doc: Document, filename: str) -> bool:
+    """
+    Validate that a Document object has a valid structure before merging
+    
+    Args:
+        doc: Document object to validate
+        filename: Original filename for error messages
+        
+    Returns:
+        True if valid, raises HTTPException if invalid
+    """
+    try:
+        # Check if document has a body element
+        if doc.element is None or doc.element.body is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid document structure in {filename}: Missing document body"
+            )
+        
+        # Check if body has valid XML structure
+        if not hasattr(doc.element.body, 'get') or doc.element.body.tag is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid document structure in {filename}: Corrupted XML structure"
+            )
+        
+        return True
+    except AttributeError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid document structure in {filename}: {str(e)}"
+        )
+
+
 
 
 @app.post("/merge-docx/",
@@ -159,44 +193,78 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
             logger.debug(f"Added DOCX file: {file.filename}")
 
         # Merge DOCX files using Composer (preserves formatting, headers, footers, etc.)
-        # Use the first DOCX as the master document
-        master_doc = Document(docx_files[0])
+        # Validate and load the first DOCX as the master document
+        try:
+            master_doc = Document(docx_files[0])
+            validate_document_structure(master_doc, os.path.basename(docx_files[0]))
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Error loading master document {docx_files[0]}: {error_msg}")
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to load master document: {error_msg[:200]}"
+            )
+        
         composer = Composer(master_doc)
+
+        # Track skipped documents
+        skipped_documents = []
+        successfully_merged = 1  # Count master document
 
         # Append remaining DOCX files
         for idx, docx_path in enumerate(docx_files[1:], start=2):
             try:
+                # Load and validate document structure before merging
                 doc_to_append = Document(docx_path)
+                validate_document_structure(doc_to_append, os.path.basename(docx_path))
+                
+                # Attempt to merge
                 composer.append(doc_to_append)
+                successfully_merged += 1
                 logger.debug(f"Merged DOCX: {os.path.basename(docx_path)}")
             except Exception as e:
                 error_msg = str(e)
-                logger.error(f"Error merging DOCX file {docx_path}: {error_msg}")
+                filename = os.path.basename(docx_path)
                 
-                # Handle specific style relationship conflicts
-                if "multiple relationships" in error_msg and "styles" in error_msg.lower():
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"Style conflict detected when merging document #{idx} ({os.path.basename(docx_path)}). "
-                            "This occurs when documents have conflicting style definitions. "
-                            "Try merging documents that were created with the same template or normalize styles before merging."
-                        )
-                    )
+                # Determine error type for logging
+                if "NoneType" in error_msg and "element" in error_msg.lower():
+                    error_type = "corrupted structure (NoneType element)"
+                elif "multiple relationships" in error_msg and "styles" in error_msg.lower():
+                    error_type = "style conflict"
                 elif "relationship" in error_msg.lower():
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"Document structure conflict when merging document #{idx} ({os.path.basename(docx_path)}). "
-                            "The documents may have incompatible internal structures. "
-                            "Please ensure all documents are valid DOCX files created with compatible versions of Word."
-                        )
-                    )
+                    error_type = "document structure conflict"
+                elif "incorrect type" in error_msg.lower() or "expected" in error_msg.lower():
+                    error_type = "invalid document structure"
                 else:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Failed to merge document #{idx} ({os.path.basename(docx_path)}): {error_msg[:200]}"
-                    )
+                    error_type = "merge error"
+                
+                # Skip this document and continue
+                skipped_documents.append({
+                    "document": filename,
+                    "position": idx,
+                    "error_type": error_type,
+                    "error": error_msg[:150]
+                })
+                logger.warning(f"Skipping document #{idx} ({filename}): {error_type} - {error_msg[:150]}")
+                continue
+
+        # Check if we merged at least one document (the master)
+        if successfully_merged == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to merge any documents. All documents appear to be invalid or corrupted."
+            )
+        
+        # Log summary
+        if skipped_documents:
+            logger.warning(
+                f"Merge completed: {successfully_merged} documents merged successfully, "
+                f"{len(skipped_documents)} documents skipped"
+            )
+        else:
+            logger.info(f"Merge completed: All {successfully_merged} documents merged successfully")
 
         # Create output file
         output_file = NamedTemporaryFile(delete=False, suffix=".docx")
@@ -204,7 +272,10 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
 
         # Save the merged document
         master_doc.save(output_file.name)
-        logger.info(f"Merged document saved to: {output_file.name} (merged {len(docx_files)} DOCX files)")
+        logger.info(
+            f"Merged document saved to: {output_file.name} "
+            f"(merged {successfully_merged}/{len(docx_files)} DOCX files)"
+        )
 
         # Read the merged file content before cleanup
         with open(output_file.name, 'rb') as f:
@@ -227,12 +298,21 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
         def iterfile():
             yield content
 
+        # Build response headers
+        headers = {
+            "Content-Disposition": "attachment; filename=merged_document.docx"
+        }
+        
+        # Add warning header if documents were skipped
+        if skipped_documents:
+            skipped_info = f"{len(skipped_documents)} documents skipped"
+            headers["X-Skipped-Documents"] = skipped_info
+            logger.info(f"Response includes warning: {skipped_info}")
+
         return StreamingResponse(
             iterfile(),
             media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            headers={
-                "Content-Disposition": "attachment; filename=merged_document.docx"
-            }
+            headers=headers
         )
 
     except HTTPException:
