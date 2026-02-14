@@ -6,6 +6,7 @@ from tempfile import NamedTemporaryFile
 from io import BytesIO
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from docx import Document
 from docx.shared import Inches
@@ -23,6 +24,32 @@ app = FastAPI(
     title="DocMerge API",
     description="API for merging DOCX and PDF files",
     version="1.0.0"
+)
+
+# Configure CORS for production deployment
+# Default allowed origins include Railway domain
+default_origins = [
+    "https://docmerge-production.up.railway.app",
+    "http://docmerge-production.up.railway.app",
+]
+
+# Allow custom CORS origins via environment variable (comma-separated)
+# If CORS_ORIGINS is set to "*", allow all origins
+cors_origins_env = os.getenv("CORS_ORIGINS", "")
+if cors_origins_env == "*":
+    cors_origins = ["*"]
+elif cors_origins_env:
+    cors_origins = [origin.strip() for origin in cors_origins_env.split(",")]
+else:
+    cors_origins = default_origins
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Validate file type
