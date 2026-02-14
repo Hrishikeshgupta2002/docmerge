@@ -111,8 +111,8 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
         raise HTTPException(status_code=400, detail="At least 2 files are required for merging")
 
     # Validation: Check file count limit
-    if len(files) > 10:  # Limit to 10 files at once
-        raise HTTPException(status_code=400, detail="Maximum 10 files allowed at once")
+    if len(files) > 40:  # Limit to 40 files at once
+        raise HTTPException(status_code=400, detail="Maximum 40 files allowed at once")
 
     # Validate each file
     for file in files:
@@ -246,6 +246,6 @@ async def api_info():
             "endpoint": "/merge-docx/",
             "method": "POST",
             "params": "Multiple DOCX or PDF files as form data",
-            "requirements": "At least 2 files, max 10 files (supports both DOCX and PDF)"
+            "requirements": "At least 2 files, max 40 files (supports both DOCX and PDF)"
         }
     }
