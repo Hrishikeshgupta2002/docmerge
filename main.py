@@ -164,17 +164,39 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
         composer = Composer(master_doc)
 
         # Append remaining DOCX files
-        for docx_path in docx_files[1:]:
+        for idx, docx_path in enumerate(docx_files[1:], start=2):
             try:
                 doc_to_append = Document(docx_path)
                 composer.append(doc_to_append)
                 logger.debug(f"Merged DOCX: {os.path.basename(docx_path)}")
             except Exception as e:
-                logger.error(f"Error merging DOCX file {docx_path}: {str(e)}")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Failed to merge DOCX file: {os.path.basename(docx_path)}"
-                )
+                error_msg = str(e)
+                logger.error(f"Error merging DOCX file {docx_path}: {error_msg}")
+                
+                # Handle specific style relationship conflicts
+                if "multiple relationships" in error_msg and "styles" in error_msg.lower():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Style conflict detected when merging document #{idx} ({os.path.basename(docx_path)}). "
+                            "This occurs when documents have conflicting style definitions. "
+                            "Try merging documents that were created with the same template or normalize styles before merging."
+                        )
+                    )
+                elif "relationship" in error_msg.lower():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Document structure conflict when merging document #{idx} ({os.path.basename(docx_path)}). "
+                            "The documents may have incompatible internal structures. "
+                            "Please ensure all documents are valid DOCX files created with compatible versions of Word."
+                        )
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to merge document #{idx} ({os.path.basename(docx_path)}): {error_msg[:200]}"
+                    )
 
         # Create output file
         output_file = NamedTemporaryFile(delete=False, suffix=".docx")
@@ -214,10 +236,11 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
         )
 
     except HTTPException:
-        # Re-raise HTTP exceptions
+        # Re-raise HTTP exceptions (these already have user-friendly messages)
         raise
     except Exception as e:
-        logger.error(f"Unexpected error during merging: {str(e)}")
+        error_msg = str(e)
+        logger.error(f"Unexpected error during merging: {error_msg}")
 
         # Ensure cleanup even if there's an exception
         for temp_path in temp_files:
@@ -233,7 +256,21 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
             except OSError:
                 pass  # Ignore errors when deleting temp files
 
-        raise HTTPException(status_code=500, detail=f"An error occurred during document merging: {str(e)}")
+        # Provide more context for common errors
+        if "relationship" in error_msg.lower():
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Document structure error during merging. "
+                    "This may occur when documents have incompatible internal structures or style definitions. "
+                    "Please ensure all documents are valid DOCX files."
+                )
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"An unexpected error occurred during document merging: {error_msg[:300]}"
+            )
 
 
 @app.get("/",
