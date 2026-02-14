@@ -93,10 +93,26 @@ async def merge_docx(files: List[UploadFile] = File(..., description="List of DO
         composer.save(output_file.name)
         logger.info(f"Merged document saved to: {output_file.name}")
 
-        # Return the merged file as a streaming response
+        # Read the merged file content before cleanup
+        with open(output_file.name, 'rb') as f:
+            content = f.read()
+
+        # Clean up temporary files early to free resources
+        for temp_path in temp_files:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass  # Ignore errors when deleting temp files
+
+        if output_file and os.path.exists(output_file.name):
+            try:
+                os.unlink(output_file.name)
+            except OSError:
+                pass  # Ignore errors when deleting temp files
+
+        # Return the merged file content as a streaming response
         def iterfile():
-            with open(output_file.name, 'rb') as f:
-                yield from f
+            yield content
 
         return StreamingResponse(
             iterfile(),
@@ -111,12 +127,12 @@ async def merge_docx(files: List[UploadFile] = File(..., description="List of DO
         raise
     except Exception as e:
         logger.error(f"Unexpected error during merging: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"An error occurred during document merging: {str(e)}")
-    finally:
-        # Clean up temporary files
+
+        # Ensure cleanup even if there's an exception
         for temp_path in temp_files:
             try:
-                os.unlink(temp_path)
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
             except OSError:
                 pass  # Ignore errors when deleting temp files
 
@@ -125,6 +141,8 @@ async def merge_docx(files: List[UploadFile] = File(..., description="List of DO
                 os.unlink(output_file.name)
             except OSError:
                 pass  # Ignore errors when deleting temp files
+
+        raise HTTPException(status_code=500, detail=f"An error occurred during document merging: {str(e)}")
 
 
 @app.get("/",
