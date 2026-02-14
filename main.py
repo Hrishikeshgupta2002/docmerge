@@ -152,6 +152,10 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
     Merge multiple DOCX files into a single document using docxcompose.Composer
     
     This preserves all formatting including headers, footers, section breaks, and complex layouts.
+    
+    Note: Documents containing content controls, form fields, or structured document tags may show 
+    "[object Object]" placeholders after merging. This is a limitation of the merging library with 
+    complex Word document elements. For best results, use documents without content controls.
 
     Args:
         files: List of DOCX files to merge (minimum 2 files required)
@@ -219,6 +223,12 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
                 # Load and validate document structure before merging
                 doc_to_append = Document(docx_path)
                 validate_document_structure(doc_to_append, os.path.basename(docx_path))
+                
+                # Ensure proper spacing between documents by adding a paragraph break
+                # This prevents text from adjacent documents from running together
+                if master_doc.paragraphs:
+                    # Add a blank paragraph to ensure spacing
+                    master_doc.add_paragraph()
                 
                 # Attempt to merge
                 composer.append(doc_to_append)
@@ -378,6 +388,11 @@ async def api_info():
             "Handles large documents efficiently",
             "Secure temporary file handling with automatic cleanup",
             "Docker-based deployment with consistent environment"
+        ],
+        "limitations": [
+            "Documents with content controls or form fields may show '[object Object]' placeholders after merging",
+            "Complex Word elements (structured document tags) may not be fully preserved",
+            "For best results, use standard DOCX files without content controls"
         ],
         "endpoints": {
             "merge": {
