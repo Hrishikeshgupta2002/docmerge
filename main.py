@@ -3,11 +3,17 @@ import uuid
 from typing import List
 import logging
 from tempfile import NamedTemporaryFile
+from io import BytesIO
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from docx import Document
+from docx.shared import Inches
 from docxcompose.composer import Composer
+
+# For PDF processing
+from pdf2image import convert_from_bytes
+from PIL import Image
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -15,37 +21,94 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="DocMerge API",
-    description="API for merging DOCX files using docxcompose",
+    description="API for merging DOCX and PDF files",
     version="1.0.0"
 )
 
 # Validate file type
-def validate_docx_file(file: UploadFile):
-    """Validate that the uploaded file is a DOCX file"""
+def validate_supported_file(file: UploadFile):
+    """Validate that the uploaded file is either a DOCX or PDF file"""
+    filename_lower = file.filename.lower()
+
     # Check file extension
-    if not file.filename.lower().endswith('.docx'):
-        raise HTTPException(status_code=400, detail="Only DOCX files are allowed")
-    
+    if not (filename_lower.endswith('.docx') or filename_lower.endswith('.pdf')):
+        raise HTTPException(status_code=400, detail="Only DOCX and PDF files are allowed")
+
     # Check content type
-    if file.content_type != "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+    allowed_types = [
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # DOCX
+        "application/pdf"  # PDF
+    ]
+    if file.content_type not in allowed_types:
         logger.warning(f"File {file.filename} has unexpected content type: {file.content_type}")
 
-@app.post("/merge-docx/",
-          summary="Merge multiple DOCX files",
-          description="Upload multiple DOCX files to merge them into a single document")
-async def merge_docx(files: List[UploadFile] = File(..., description="List of DOCX files to merge")):
+def convert_pdf_to_images(pdf_bytes: bytes) -> List[Image.Image]:
     """
-    Merge multiple DOCX files into a single document
+    Convert PDF bytes to a list of PIL Image objects
+    """
+    try:
+        # Convert PDF to list of images
+        images = convert_from_bytes(pdf_bytes)
+        return images
+    except Exception as e:
+        logger.error(f"Error converting PDF to images: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Could not process PDF file: {str(e)}")
+
+
+def add_pdf_as_images_to_doc(doc: Document, pdf_bytes: bytes):
+    """
+    Convert PDF pages to images and add them to the word document
+    """
+    try:
+        # Convert PDF to images
+        images = convert_pdf_to_images(pdf_bytes)
+
+        # Add each image to the document
+        for i, image in enumerate(images):
+            # Add a paragraph to hold the image
+            paragraph = doc.add_paragraph()
+
+            # Add the image to the paragraph
+            # Resize image to fit page width while preserving aspect ratio
+            img_width = Inches(6.5)  # Standard page width with margins
+
+            # Calculate proportional height
+            aspect_ratio = image.height / image.width
+            img_height = img_width * aspect_ratio
+
+            # Create a BytesIO object to store the image in memory
+            img_io = BytesIO()
+            image.save(img_io, 'JPEG')
+            img_io.seek(0)
+
+            run = paragraph.add_run()
+            run.add_picture(img_io, width=img_width, height=img_height)
+
+            # Add page break between pages (except for the last page)
+            if i < len(images) - 1:
+                doc.add_page_break()
+
+    except Exception as e:
+        logger.error(f"Error adding PDF images to document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Could not add PDF content to document: {str(e)}")
+
+
+@app.post("/merge-docx/",
+          summary="Merge multiple DOCX or PDF files",
+          description="Upload multiple DOCX or PDF files to merge them into a single document")
+async def merge_files(files: List[UploadFile] = File(..., description="List of DOCX or PDF files to merge")):
+    """
+    Merge multiple DOCX or PDF files into a single document
 
     Args:
-        files: List of DOCX files to merge (minimum 2 files required)
+        files: List of DOCX or PDF files to merge (minimum 2 files required)
 
     Returns:
-        FileResponse: The merged DOCX file
+        StreamingResponse: The merged DOCX file
     """
     # Validation: Check if at least 2 files are provided
     if len(files) < 2:
-        raise HTTPException(status_code=400, detail="At least 2 DOCX files are required for merging")
+        raise HTTPException(status_code=400, detail="At least 2 files are required for merging")
 
     # Validation: Check file count limit
     if len(files) > 10:  # Limit to 10 files at once
@@ -53,44 +116,54 @@ async def merge_docx(files: List[UploadFile] = File(..., description="List of DO
 
     # Validate each file
     for file in files:
-        validate_docx_file(file)
+        validate_supported_file(file)
 
-    temp_files = []
+    temp_files = []  # Track DOCX files only
     output_file = None
 
     try:
-        # Save uploaded files temporarily
+        # Create the initial document
+        doc = Document()
+
+        # Process each file
         for file in files:
-            temp_file = NamedTemporaryFile(delete=False, suffix=".docx")
             content = await file.read()
-            temp_file.write(content)
-            temp_file.close()
-            temp_files.append(temp_file.name)
-            logger.info(f"Saved temporary file: {temp_file.name}")
+            file_extension = file.filename.lower().split('.')[-1]
 
-        # Merge documents
-        logger.info(f"Merging {len(temp_files)} documents...")
+            if file_extension == 'docx':
+                # Handle DOCX files by adding their content to the current document
+                try:
+                    # Create a temporary file for the uploaded docx
+                    temp_file = NamedTemporaryFile(delete=False, suffix=".docx")
+                    temp_file.write(content)
+                    temp_file.close()
+                    temp_files.append(temp_file.name)
 
-        # Load the first document as the master
-        master = Document(temp_files[0])
-        composer = Composer(master)
+                    # Load the docx and append its paragraphs to our document
+                    temp_doc = Document(temp_file.name)
+                    for element in temp_doc.element.body:
+                        doc.element.body.append(element)
 
-        # Append remaining documents
-        for file_path in temp_files[1:]:
-            try:
-                doc = Document(file_path)
-                composer.append(doc)
-                logger.info(f"Appended document: {file_path}")
-            except Exception as e:
-                logger.error(f"Error appending document {file_path}: {str(e)}")
-                raise HTTPException(status_code=400, detail=f"Invalid DOCX file detected: {file_path}")
+                except Exception as e:
+                    logger.error(f"Error processing DOCX file {file.filename}: {str(e)}")
+                    raise HTTPException(status_code=400, detail=f"Invalid DOCX file: {file.filename}")
+
+            elif file_extension == 'pdf':
+                # Handle PDF files by converting to images and adding to document
+                try:
+                    add_pdf_as_images_to_doc(doc, content)
+                except Exception as e:
+                    logger.error(f"Error processing PDF file {file.filename}: {str(e)}")
+                    raise HTTPException(status_code=400, detail=f"Invalid PDF file: {file.filename}")
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_extension}")
 
         # Create output file
         output_file = NamedTemporaryFile(delete=False, suffix=".docx")
         output_file.close()
 
         # Save the merged document
-        composer.save(output_file.name)
+        doc.save(output_file.name)
         logger.info(f"Merged document saved to: {output_file.name}")
 
         # Read the merged file content before cleanup
@@ -161,9 +234,10 @@ async def api_info():
     return {
         "title": "DocMerge API",
         "version": "1.0.0",
-        "description": "API for merging DOCX files using docxcompose",
+        "description": "API for merging DOCX and PDF files",
         "features": [
-            "Merge multiple DOCX files into a single document",
+            "Merge multiple DOCX and PDF files into a single document",
+            "Convert PDF pages to images and embed them in Word documents",
             "Pure Python implementation - no external dependencies",
             "Handles large documents efficiently",
             "Secure temporary file handling"
@@ -171,7 +245,7 @@ async def api_info():
         "usage": {
             "endpoint": "/merge-docx/",
             "method": "POST",
-            "params": "Multiple DOCX files as form data",
-            "requirements": "At least 2 DOCX files, max 10 files"
+            "params": "Multiple DOCX or PDF files as form data",
+            "requirements": "At least 2 files, max 10 files (supports both DOCX and PDF)"
         }
     }
