@@ -1,0 +1,188 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "DocMerge API",
+    "description": "A production-ready API for document processing operations.\n\n## Features\n\n* **Merge Documents**: Combine multiple DOCX and PDF files into a single document\n* **Convert to PDF**: Convert DOCX files to PDF format using LibreOffice (100% free)\n* **PDF Processing**: Convert PDF pages to images and embed them in Word documents\n\n## Technology Stack\n\n* FastAPI for high-performance async API\n* LibreOffice for document conversion (open-source, no licensing fees)\n* Docker-based deployment for consistent environments\n* Railway-ready with optimized configuration\n\n## Endpoints\n\n* `POST /merge-docx/` - Merge multiple DOCX or PDF files\n* `POST /docx-to-pdf/` - Convert DOCX file to PDF\n* `GET /` - Health check endpoint\n* `GET /info` - API information and capabilities",
+    "version": "1.0.0",
+    "contact": {
+      "name": "DocMerge API",
+      "url": "https://docmerge-production.up.railway.app"
+    },
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://docmerge-production.up.railway.app",
+      "description": "Production server"
+    },
+    {
+      "url": "http://localhost:8080",
+      "description": "Local development server"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Documents",
+      "description": "Document processing operations including merging and conversion."
+    },
+    {
+      "name": "Health",
+      "description": "Health check and API information endpoints."
+    }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "API Health Check",
+        "description": "Check if the API is running properly",
+        "operationId": "health_check__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/info": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "API Information",
+        "description": "Get information about the API capabilities",
+        "operationId": "api_info_info_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/merge-docx/": {
+      "post": {
+        "tags": ["Documents"],
+        "summary": "Merge multiple DOCX files",
+        "description": "Upload multiple DOCX files to merge them into a single document using enterprise-grade merging",
+        "operationId": "merge_files_merge_docx__post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "files": {
+                    "title": "Files",
+                    "description": "List of DOCX files to merge (minimum 2 files required)",
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    }
+                  }
+                },
+                "required": ["files"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            },
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "attachment; filename=merged_document.docx"
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request - Invalid input or validation error"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/docx-to-pdf/": {
+      "post": {
+        "tags": ["Documents"],
+        "summary": "Convert DOCX to PDF",
+        "description": "Convert a single DOCX file to PDF using LibreOffice",
+        "operationId": "docx_to_pdf_docx_to_pdf__post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "title": "File",
+                    "description": "DOCX file to convert to PDF",
+                    "type": "string",
+                    "format": "binary"
+                  }
+                },
+                "required": ["file"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            },
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "attachment; filename={input_filename}.pdf"
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request - Invalid file type or validation error"
+          },
+          "500": {
+            "description": "Internal Server Error - Conversion failed"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {}
+  }
+}
+
