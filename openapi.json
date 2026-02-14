@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "DocMerge API",
-    "description": "A production-ready API for document processing operations.\n\n## Features\n\n* **Merge Documents**: Combine multiple DOCX and PDF files into a single document\n* **Convert to PDF**: Convert DOCX files to PDF format using LibreOffice (100% free)\n* **PDF Processing**: Convert PDF pages to images and embed them in Word documents\n\n## Technology Stack\n\n* FastAPI for high-performance async API\n* LibreOffice for document conversion (open-source, no licensing fees)\n* Docker-based deployment for consistent environments\n* Railway-ready with optimized configuration\n\n## Endpoints\n\n* `POST /merge-docx/` - Merge multiple DOCX or PDF files\n* `POST /docx-to-pdf/` - Convert DOCX file to PDF\n* `GET /` - Health check endpoint\n* `GET /info` - API information and capabilities",
+    "description": "A production-ready API for merging DOCX documents.\n\n## Features\n\n* **Merge Documents**: Combine multiple DOCX files into a single document with enterprise-grade merging\n* **Preserves Formatting**: Headers, footers, section breaks, and complex layouts are maintained\n\n## Technology Stack\n\n* FastAPI for high-performance async API\n* docxcompose.Composer for enterprise-grade document merging\n* Docker-based deployment for consistent environments\n* Railway-ready with optimized configuration\n\n## Endpoints\n\n* `POST /merge-docx/` - Merge multiple DOCX files\n* `GET /` - Health check endpoint\n* `GET /info` - API information and capabilities",
     "version": "1.0.0",
     "contact": {
       "name": "DocMerge API",
@@ -25,7 +25,7 @@
   "tags": [
     {
       "name": "Documents",
-      "description": "Document processing operations including merging and conversion."
+      "description": "Document merging operations."
     },
     {
       "name": "Health",
@@ -44,7 +44,19 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "healthy"
+                    },
+                    "message": {
+                      "type": "string",
+                      "example": "DocMerge API is running"
+                    }
+                  }
+                }
               }
             }
           }
@@ -62,7 +74,56 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": "string",
+                      "example": "DocMerge API"
+                    },
+                    "version": {
+                      "type": "string",
+                      "example": "1.0.0"
+                    },
+                    "description": {
+                      "type": "string",
+                      "example": "API for merging DOCX files"
+                    },
+                    "features": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "endpoints": {
+                      "type": "object",
+                      "properties": {
+                        "merge": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "example": "/merge-docx/"
+                            },
+                            "method": {
+                              "type": "string",
+                              "example": "POST"
+                            },
+                            "description": {
+                              "type": "string"
+                            },
+                            "params": {
+                              "type": "string"
+                            },
+                            "requirements": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
               }
             }
           }
@@ -122,60 +183,6 @@
           },
           "500": {
             "description": "Internal Server Error"
-          }
-        }
-      }
-    },
-    "/docx-to-pdf/": {
-      "post": {
-        "tags": ["Documents"],
-        "summary": "Convert DOCX to PDF",
-        "description": "Convert a single DOCX file to PDF using LibreOffice",
-        "operationId": "docx_to_pdf_docx_to_pdf__post",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "multipart/form-data": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "file": {
-                    "title": "File",
-                    "description": "DOCX file to convert to PDF",
-                    "type": "string",
-                    "format": "binary"
-                  }
-                },
-                "required": ["file"]
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/pdf": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              }
-            },
-            "headers": {
-              "Content-Disposition": {
-                "schema": {
-                  "type": "string"
-                },
-                "description": "attachment; filename={input_filename}.pdf"
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request - Invalid file type or validation error"
-          },
-          "500": {
-            "description": "Internal Server Error - Conversion failed"
           }
         }
       }
