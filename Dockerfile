@@ -9,7 +9,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HOME=/home/appuser \
-    XDG_RUNTIME_DIR=/tmp
+    XDG_RUNTIME_DIR=/tmp \
+    SAL_USE_VCLPLUGIN=gen
 
 # Install system dependencies
 # LibreOffice for document processing

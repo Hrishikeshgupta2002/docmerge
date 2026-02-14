@@ -1,8 +1,10 @@
 import os
 import re
+import subprocess
+import shutil
 from typing import List
 import logging
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, mkdtemp
 import wordninja
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -10,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from docx import Document
 from docxcompose.composer import Composer
+from pypdf import PdfMerger
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -141,6 +144,94 @@ def validate_document_structure(doc: Document, filename: str) -> bool:
             status_code=400,
             detail=f"Invalid document structure in {filename}: {str(e)}"
         )
+
+
+def convert_docx_to_pdf(docx_path: str, output_dir: str) -> str:
+    """
+    Convert DOCX to PDF using LibreOffice headless.
+    Memory-safe: processes one file at a time, writes to disk immediately.
+    
+    Args:
+        docx_path: Path to the DOCX file to convert
+        output_dir: Directory where the PDF will be saved
+        
+    Returns:
+        Path to the generated PDF file
+        
+    Raises:
+        Exception: If conversion fails
+    """
+    try:
+        # Use LibreOffice headless mode for conversion
+        # SAL_USE_VCLPLUGIN=gen is set in Dockerfile for Railway compatibility
+        result = subprocess.run(
+            [
+                "libreoffice",
+                "--headless",
+                "--convert-to",
+                "pdf",
+                docx_path,
+                "--outdir",
+                output_dir
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=120  # 2 minute timeout per file
+        )
+        
+        # LibreOffice generates PDF with same name but .pdf extension
+        pdf_path = os.path.join(
+            output_dir,
+            os.path.basename(docx_path).replace(".docx", ".pdf")
+        )
+        
+        if not os.path.exists(pdf_path):
+            raise Exception("PDF file was not generated after conversion")
+        
+        logger.debug(f"Converted DOCX to PDF: {os.path.basename(docx_path)} -> {os.path.basename(pdf_path)}")
+        return pdf_path
+        
+    except subprocess.TimeoutExpired:
+        raise Exception(f"DOCX to PDF conversion timed out for {os.path.basename(docx_path)}")
+    except subprocess.CalledProcessError as e:
+        raise Exception(f"DOCX to PDF conversion failed for {os.path.basename(docx_path)}: {str(e)}")
+    except Exception as e:
+        raise Exception(f"DOCX to PDF conversion error: {str(e)}")
+
+
+def merge_pdfs(pdf_paths: List[str], output_path: str):
+    """
+    Merge multiple PDF files into a single PDF using streaming merge.
+    Memory-safe: uses pypdf's streaming merge, never loads all pages in RAM.
+    
+    Args:
+        pdf_paths: List of paths to PDF files to merge
+        output_path: Path where the merged PDF will be saved
+        
+    Raises:
+        Exception: If merge fails
+    """
+    merger = PdfMerger()
+    
+    try:
+        for pdf_path in pdf_paths:
+            if not os.path.exists(pdf_path):
+                raise Exception(f"PDF file not found: {os.path.basename(pdf_path)}")
+            
+            merger.append(pdf_path)
+            logger.debug(f"Added PDF to merger: {os.path.basename(pdf_path)}")
+        
+        # Write merged PDF to disk (streaming, low memory)
+        with open(output_path, "wb") as f:
+            merger.write(f)
+        
+        logger.debug(f"Merged {len(pdf_paths)} PDFs into: {os.path.basename(output_path)}")
+        
+    except Exception as e:
+        raise Exception(f"PDF merge failed: {str(e)}")
+    finally:
+        merger.close()
 
 
 def is_protected_content(text: str) -> bool:
@@ -611,6 +702,165 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
             )
 
 
+@app.post("/merge-pdf/",
+          summary="Merge multiple DOCX files as PDF",
+          description="Convert DOCX files to PDF and merge them into a single PDF document. Memory-safe sequential processing.",
+          tags=["Documents"])
+async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="List of DOCX files to convert and merge as PDF")):
+    """
+    Convert multiple DOCX files to PDF and merge them into a single PDF document.
+    
+    This endpoint:
+    - Converts each DOCX to PDF sequentially (memory-safe)
+    - Merges PDFs using streaming merge (low memory footprint)
+    - Returns a single merged PDF file
+    
+    Perfect for RFP systems where final output is PDF and layout preservation is critical.
+    
+    Args:
+        files: List of DOCX files to convert and merge (minimum 2 files required)
+
+    Returns:
+        StreamingResponse: The merged PDF file
+    """
+    # Validation: Check if at least 2 files are provided
+    if len(files) < 2:
+        raise HTTPException(status_code=400, detail="At least 2 files are required for merging")
+    
+    # Validation: Check file count limit
+    if len(files) > 40:  # Limit to 40 files at once
+        raise HTTPException(status_code=400, detail="Maximum 40 files allowed at once")
+    
+    # Validate each file - only DOCX allowed
+    for file in files:
+        validate_docx_file(file)
+    
+    docx_files = []
+    pdf_files = []
+    temp_files = []  # Track all temporary files for cleanup
+    temp_dir = None
+    output_file = None
+    
+    try:
+        # Create temporary directory for conversions
+        temp_dir = mkdtemp()
+        logger.debug(f"Created temporary directory: {temp_dir}")
+        
+        # Save all DOCX files temporarily
+        for file in files:
+            content = await file.read()
+            file_extension = file.filename.lower().split('.')[-1]
+            
+            if file_extension != 'docx':
+                raise HTTPException(status_code=400, detail=f"Only DOCX files are supported. Received: {file_extension}")
+            
+            # Save DOCX file temporarily
+            temp_file = NamedTemporaryFile(delete=False, suffix=".docx", dir=temp_dir)
+            temp_file.write(content)
+            temp_file.close()
+            temp_files.append(temp_file.name)
+            docx_files.append(temp_file.name)
+            logger.debug(f"Saved DOCX file: {file.filename}")
+        
+        # Convert DOCX files to PDF sequentially (memory-safe)
+        # Process one at a time to avoid memory spikes
+        for idx, docx_path in enumerate(docx_files, start=1):
+            try:
+                logger.info(f"Converting DOCX to PDF ({idx}/{len(docx_files)}): {os.path.basename(docx_path)}")
+                pdf_path = convert_docx_to_pdf(docx_path, temp_dir)
+                pdf_files.append(pdf_path)
+                temp_files.append(pdf_path)  # Track for cleanup
+                logger.debug(f"Successfully converted: {os.path.basename(docx_path)}")
+            except Exception as e:
+                error_msg = str(e)
+                filename = os.path.basename(docx_path)
+                logger.error(f"Failed to convert {filename} to PDF: {error_msg}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to convert {filename} to PDF: {error_msg[:200]}"
+                )
+        
+        if len(pdf_files) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="At least 2 PDF files are required for merging. Conversion may have failed."
+            )
+        
+        # Merge PDFs using streaming merge (low memory)
+        logger.info(f"Merging {len(pdf_files)} PDF files...")
+        output_file = NamedTemporaryFile(delete=False, suffix=".pdf", dir=temp_dir)
+        output_file.close()
+        
+        merge_pdfs(pdf_files, output_file.name)
+        logger.info(f"Successfully merged {len(pdf_files)} PDFs")
+        
+        # Read the merged PDF content
+        with open(output_file.name, 'rb') as f:
+            content = f.read()
+        
+        # Clean up temporary files
+        for temp_path in temp_files:
+            try:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            except OSError:
+                pass  # Ignore errors when deleting temp files
+        
+        # Clean up temporary directory
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                os.rmdir(temp_dir)
+            except OSError:
+                pass  # Directory may not be empty, ignore
+        
+        # Return the merged PDF as a streaming response
+        def iterfile():
+            yield content
+        
+        headers = {
+            "Content-Disposition": "attachment; filename=merged_document.pdf"
+        }
+        
+        return StreamingResponse(
+            iterfile(),
+            media_type="application/pdf",
+            headers=headers
+        )
+    
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Unexpected error during PDF merge: {error_msg}")
+        
+        # Ensure cleanup even if there's an exception
+        for temp_path in temp_files:
+            try:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            except OSError:
+                pass
+        
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                # Try to remove directory (may not be empty)
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+        
+        if output_file and os.path.exists(output_file.name):
+            try:
+                os.unlink(output_file.name)
+            except OSError:
+                pass
+        
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred during PDF merge: {error_msg[:300]}"
+        )
+
+
 @app.get("/",
          summary="API Health Check",
          description="Check if the API is running properly",
@@ -631,24 +881,38 @@ async def api_info():
         "version": "1.0.0",
         "description": "API for merging DOCX files",
         "features": [
-            "Merge multiple DOCX files into a single document",
+            "Merge multiple DOCX files into a single document (DOCX output)",
+            "Convert and merge DOCX files as PDF (PDF output)",
             "Enterprise-grade DOCX merging using docxcompose.Composer (preserves headers, footers, section breaks)",
+            "Memory-safe PDF conversion using LibreOffice headless (sequential processing)",
+            "Streaming PDF merge using pypdf (low memory footprint)",
             "Handles large documents efficiently",
             "Secure temporary file handling with automatic cleanup",
             "Docker-based deployment with consistent environment"
         ],
         "limitations": [
-            "Documents with content controls or form fields may show '[object Object]' placeholders after merging",
-            "Complex Word elements (structured document tags) may not be fully preserved",
-            "For best results, use standard DOCX files without content controls"
+            "Documents with content controls or form fields may show '[object Object]' placeholders after DOCX merging",
+            "Complex Word elements (structured document tags) may not be fully preserved in DOCX output",
+            "For best results, use standard DOCX files without content controls",
+            "PDF conversion requires LibreOffice (included in Docker image)"
         ],
         "endpoints": {
-            "merge": {
+            "merge_docx": {
                 "path": "/merge-docx/",
                 "method": "POST",
-                "description": "Merge multiple DOCX files",
+                "description": "Merge multiple DOCX files into a single DOCX document",
                 "params": "Multiple DOCX files as form data",
-                "requirements": "At least 2 DOCX files, max 40 files"
+                "requirements": "At least 2 DOCX files, max 40 files",
+                "output": "DOCX file"
+            },
+            "merge_pdf": {
+                "path": "/merge-pdf/",
+                "method": "POST",
+                "description": "Convert DOCX files to PDF and merge into a single PDF document",
+                "params": "Multiple DOCX files as form data",
+                "requirements": "At least 2 DOCX files, max 40 files",
+                "output": "PDF file",
+                "note": "Memory-safe sequential processing, perfect for RFP systems"
             }
         }
     }
