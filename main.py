@@ -153,7 +153,7 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None
                 unique_dest = os.path.join(output_dir, base_name)
                 if newest_pdf != unique_dest:
                     shutil.copy2(newest_pdf, unique_dest)
-                    logger.debug(f"Copied {newest_pdf} -> {unique_dest}")
+                    logger.info(f"Copied {os.path.basename(newest_pdf)} -> {base_name}")
                 return unique_dest
 
         logger.error(f"PDF not found. Checked: {candidates}")
