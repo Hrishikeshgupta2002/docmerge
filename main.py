@@ -133,7 +133,7 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None
                 logger.debug(f"PDF found at {candidate}")
                 return candidate
 
-        # LibreOffice sometimes writes tmpXXX.pdf and ignores --outdir; find most recent PDF
+        # LibreOffice sometimes writes tmpXXX.pdf and overwrites same file; copy to unique path
         if result.returncode == 0:
             search_dirs = (output_dir, docx_dir, prof)
             newest_pdf: str | None = None
@@ -149,8 +149,12 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None
                             newest_mtime = mtime
                             newest_pdf = p
             if newest_pdf:
-                logger.info(f"Using LibreOffice output (non-standard name): {newest_pdf}")
-                return newest_pdf
+                # Copy to output_dir with expected name so each conversion has unique path
+                unique_dest = os.path.join(output_dir, base_name)
+                if newest_pdf != unique_dest:
+                    shutil.copy2(newest_pdf, unique_dest)
+                    logger.debug(f"Copied {newest_pdf} -> {unique_dest}")
+                return unique_dest
 
         logger.error(f"PDF not found. Checked: {candidates}")
         for d in (output_dir, docx_dir, prof):
@@ -199,6 +203,7 @@ async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="DO
         validate_docx_file(f)
 
     temp_dir = None
+    output_dir = None
     temp_files = []
     output_file = None
 
@@ -218,7 +223,9 @@ async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="DO
 
         logger.info(f"Received {len(files)} DOCX files, {total_bytes} bytes total. temp_dir={temp_dir}")
 
-        output_file = NamedTemporaryFile(delete=False, suffix=".pdf", dir=temp_dir)
+        # Output in separate dir to avoid collision with LibreOffice temp PDFs in docx dir
+        output_dir = mkdtemp(prefix="docmerge_out_")
+        output_file = NamedTemporaryFile(delete=False, suffix=".pdf", dir=output_dir)
         output_file.close()
         temp_files.append(output_file.name)
 
@@ -241,6 +248,8 @@ async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="DO
                 pass
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
+        if output_dir and os.path.isdir(output_dir):
+            shutil.rmtree(output_dir, ignore_errors=True)
 
         def iterfile():
             yield content
@@ -264,6 +273,8 @@ async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="DO
                 pass
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
+        if output_dir and os.path.isdir(output_dir):
+            shutil.rmtree(output_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"PDF merge failed: {error_msg[:200]}")
 
 
