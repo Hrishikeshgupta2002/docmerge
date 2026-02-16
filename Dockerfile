@@ -12,19 +12,9 @@ ENV PYTHONUNBUFFERED=1 \
     XDG_RUNTIME_DIR=/tmp \
     SAL_USE_VCLPLUGIN=gen
 
-# Install system dependencies
-# LibreOffice for document processing
-# poppler-utils for PDF to image conversion (required by pdf2image)
-# Additional dependencies for image processing
+# Install LibreOffice for DOCX→PDF conversion
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        libreoffice \
-        poppler-utils \
-        libpoppler-cpp-dev \
-        libjpeg-dev \
-        zlib1g-dev \
-        libpng-dev \
-        && \
+    apt-get install -y --no-install-recommends libreoffice && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
