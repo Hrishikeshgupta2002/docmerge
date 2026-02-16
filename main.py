@@ -51,44 +51,79 @@ def validate_docx_file(file: UploadFile):
 
 
 # LibreOffice headless env (Railway/Docker: no display, gen plugin, writable runtime)
-_LIBREOFFICE_ENV = {
-    **os.environ,
-    "SAL_USE_VCLPLUGIN": "gen",
-    "HOME": os.environ.get("HOME", "/tmp"),
-    "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", "/tmp"),
-}
+def _libreoffice_env(profile_dir: str) -> dict:
+    return {
+        **os.environ,
+        "SAL_USE_VCLPLUGIN": "gen",
+        "HOME": profile_dir,
+        "XDG_RUNTIME_DIR": profile_dir,
+        "TMPDIR": profile_dir,
+    }
 
 
-def convert_docx_to_pdf(docx_path: str, output_dir: str) -> str:
+def _resolve_soffice() -> str:
+    """Resolve soffice/libreoffice/lowriter executable. Prefer soffice, fallback to lowriter for DOCX."""
+    for cmd in ("soffice", "libreoffice", "lowriter"):
+        try:
+            path = shutil.which(cmd)
+            if path:
+                return path
+        except Exception:
+            pass
+    return "soffice"  # fallback; will raise FileNotFoundError if missing
+
+
+_SOFFICE_CMD: str | None = None
+
+
+def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None = None) -> str:
     """
     Convert DOCX to PDF using LibreOffice headless.
-    Uses docx directory as --outdir for reliability (some LibreOffice builds
-    ignore --outdir when it differs from the source directory).
+    Uses a unique profile dir per conversion to avoid lock conflicts in batch processing.
     """
+    global _SOFFICE_CMD
+    if _SOFFICE_CMD is None:
+        _SOFFICE_CMD = _resolve_soffice()
+        logger.info(f"Using LibreOffice: {_SOFFICE_CMD}")
+
     base_name = os.path.basename(docx_path).replace(".docx", ".pdf")
-    # Use output_dir; fallback to docx dir if LibreOffice wrote next to source
     expected_path = os.path.join(output_dir, base_name)
     docx_dir = os.path.dirname(os.path.abspath(docx_path))
 
+    # Unique profile per conversion: avoids profile locks when processing many files
+    prof = profile_dir or mkdtemp(prefix="lo_profile_")
+    env = _libreoffice_env(prof)
     try:
         result = subprocess.run(
-            ["libreoffice", "--headless", "--convert-to", "pdf", docx_path, "--outdir", output_dir],
+            [
+                _SOFFICE_CMD,
+                "--headless",
+                "--norestore",
+                f"-env:UserInstallation=file://{prof}",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                output_dir,
+                docx_path,
+            ],
             capture_output=True,
             text=True,
             timeout=120,
-            env=_LIBREOFFICE_ENV,
+            env=env,
+            cwd=output_dir,
         )
         if result.returncode != 0:
-            stderr_preview = (result.stderr or "").strip()[:500]
-            logger.warning(f"LibreOffice exit {result.returncode} for {base_name}: {stderr_preview}")
+            stderr_full = (result.stderr or "").strip()
+            stdout_full = (result.stdout or "").strip()
+            logger.warning(
+                f"LibreOffice exit {result.returncode} for {base_name}. stderr: {stderr_full[:800]} | stdout: {stdout_full[:300]}"
+            )
 
-        # Check expected location first, then fallback to docx directory
-        for candidate in (expected_path, os.path.join(docx_dir, base_name)):
+        for candidate in (expected_path, os.path.join(docx_dir, base_name), os.path.join(prof, base_name)):
             if os.path.exists(candidate):
                 return candidate
 
-        # Diagnostic: log what LibreOffice produced
-        for d in (output_dir, docx_dir):
+        for d in (output_dir, docx_dir, prof):
             if os.path.isdir(d):
                 contents = os.listdir(d)
                 pdfs = [f for f in contents if f.lower().endswith(".pdf")]
@@ -98,6 +133,9 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str) -> str:
         raise Exception(f"PDF was not generated for {os.path.basename(docx_path)}")
     except subprocess.TimeoutExpired:
         raise Exception(f"Conversion timed out: {os.path.basename(docx_path)}")
+    finally:
+        if profile_dir is None and os.path.isdir(prof):
+            shutil.rmtree(prof, ignore_errors=True)
 
 
 def merge_pdfs(pdf_paths: List[str], output_path: str):
@@ -187,6 +225,28 @@ async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="DO
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"PDF merge failed: {error_msg[:200]}")
+
+
+@app.on_event("startup")
+async def startup_validation():
+    """Verify LibreOffice is available before accepting requests."""
+    try:
+        cmd = _resolve_soffice()
+        r = subprocess.run(
+            [cmd, "--headless", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**os.environ, "SAL_USE_VCLPLUGIN": "gen", "HOME": "/tmp", "XDG_RUNTIME_DIR": "/tmp"},
+        )
+        if r.returncode == 0:
+            logger.info(f"LibreOffice OK: {cmd}")
+        else:
+            logger.warning(f"LibreOffice version check returned {r.returncode}: {r.stderr[:200]}")
+    except FileNotFoundError:
+        logger.error("LibreOffice/soffice not found in PATH")
+    except Exception as e:
+        logger.warning(f"LibreOffice startup check: {e}")
 
 
 @app.get("/")

@@ -12,9 +12,13 @@ ENV PYTHONUNBUFFERED=1 \
     XDG_RUNTIME_DIR=/tmp \
     SAL_USE_VCLPLUGIN=gen
 
-# Install LibreOffice for DOCX→PDF conversion
+# Install LibreOffice and fonts for reliable DOCX→PDF conversion
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libreoffice && \
+    apt-get install -y --no-install-recommends \
+        libreoffice \
+        libreoffice-writer \
+        fonts-crosextra-carlito \
+        fonts-crosextra-caladea && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
