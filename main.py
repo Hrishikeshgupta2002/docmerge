@@ -90,12 +90,16 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None
 
     base_name = os.path.basename(docx_path).replace(".docx", ".pdf")
     expected_path = os.path.join(output_dir, base_name)
-    docx_dir = os.path.dirname(os.path.abspath(docx_path))
+    docx_path_abs = os.path.abspath(docx_path)
+    docx_dir = os.path.dirname(docx_path_abs)
 
     # Unique profile per conversion: avoids profile locks when processing many files
     prof = profile_dir or mkdtemp(prefix="lo_profile_")
     env = _libreoffice_env(prof)
-    logger.debug(f"Converting {docx_path} -> {expected_path}, profile={prof}")
+    logger.debug(f"Converting {docx_path_abs} -> {expected_path}, profile={prof}")
+
+    # LibreOffice often ignores --outdir when it differs from source dir; use docx_dir for reliable output
+    outdir_for_lo = docx_dir
 
     try:
         t0 = time.perf_counter()
@@ -108,17 +112,21 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None
                 "--convert-to",
                 "pdf",
                 "--outdir",
-                output_dir,
-                docx_path,
+                outdir_for_lo,
+                docx_path_abs,
             ],
             capture_output=True,
             text=True,
             timeout=120,
             env=env,
-            cwd=output_dir,
+            cwd=docx_dir,
         )
         elapsed = time.perf_counter() - t0
         logger.info(f"LibreOffice conversion {base_name}: returncode={result.returncode}, elapsed={elapsed:.2f}s")
+
+        # Allow filesystem sync (LibreOffice may flush after process exits)
+        if result.returncode == 0:
+            time.sleep(0.3)
 
         if result.returncode != 0:
             stderr_full = (result.stderr or "").strip()
@@ -156,6 +164,12 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None
                     logger.info(f"Copied {os.path.basename(newest_pdf)} -> {base_name}")
                 return unique_dest
 
+        # Log stdout/stderr even on success - may explain missing output
+        if result.returncode == 0:
+            lo_stdout = (result.stdout or "").strip()
+            lo_stderr = (result.stderr or "").strip()
+            if lo_stdout or lo_stderr:
+                logger.warning(f"LibreOffice stdout: {lo_stdout[:500]} | stderr: {lo_stderr[:500]}")
         logger.error(f"PDF not found. Checked: {candidates}")
         for d in (output_dir, docx_dir, prof):
             if os.path.isdir(d):
