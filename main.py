@@ -50,27 +50,54 @@ def validate_docx_file(file: UploadFile):
         raise HTTPException(status_code=400, detail="Only DOCX files are allowed")
 
 
+# LibreOffice headless env (Railway/Docker: no display, gen plugin, writable runtime)
+_LIBREOFFICE_ENV = {
+    **os.environ,
+    "SAL_USE_VCLPLUGIN": "gen",
+    "HOME": os.environ.get("HOME", "/tmp"),
+    "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", "/tmp"),
+}
+
+
 def convert_docx_to_pdf(docx_path: str, output_dir: str) -> str:
-    """Convert DOCX to PDF using LibreOffice headless."""
+    """
+    Convert DOCX to PDF using LibreOffice headless.
+    Uses docx directory as --outdir for reliability (some LibreOffice builds
+    ignore --outdir when it differs from the source directory).
+    """
+    base_name = os.path.basename(docx_path).replace(".docx", ".pdf")
+    # Use output_dir; fallback to docx dir if LibreOffice wrote next to source
+    expected_path = os.path.join(output_dir, base_name)
+    docx_dir = os.path.dirname(os.path.abspath(docx_path))
+
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["libreoffice", "--headless", "--convert-to", "pdf", docx_path, "--outdir", output_dir],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
             timeout=120,
+            env=_LIBREOFFICE_ENV,
         )
-        pdf_path = os.path.join(
-            output_dir,
-            os.path.basename(docx_path).replace(".docx", ".pdf"),
-        )
-        if not os.path.exists(pdf_path):
-            raise Exception("PDF was not generated")
-        return pdf_path
+        if result.returncode != 0:
+            stderr_preview = (result.stderr or "").strip()[:500]
+            logger.warning(f"LibreOffice exit {result.returncode} for {base_name}: {stderr_preview}")
+
+        # Check expected location first, then fallback to docx directory
+        for candidate in (expected_path, os.path.join(docx_dir, base_name)):
+            if os.path.exists(candidate):
+                return candidate
+
+        # Diagnostic: log what LibreOffice produced
+        for d in (output_dir, docx_dir):
+            if os.path.isdir(d):
+                contents = os.listdir(d)
+                pdfs = [f for f in contents if f.lower().endswith(".pdf")]
+                if pdfs:
+                    logger.warning(f"LibreOffice created {pdfs} in {d}, expected {base_name}")
+                break
+        raise Exception(f"PDF was not generated for {os.path.basename(docx_path)}")
     except subprocess.TimeoutExpired:
         raise Exception(f"Conversion timed out: {os.path.basename(docx_path)}")
-    except subprocess.CalledProcessError as e:
-        raise Exception(f"Conversion failed: {os.path.basename(docx_path)} - {e}")
 
 
 def merge_pdfs(pdf_paths: List[str], output_path: str):
