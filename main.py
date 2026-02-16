@@ -52,7 +52,7 @@ def validate_docx_file(file: UploadFile):
         raise HTTPException(status_code=400, detail="Only DOCX files are allowed")
 
 
-# LibreOffice headless env (Railway/Docker: no display, gen plugin, writable runtime)
+# LibreOffice headless env (no X11 display, gen plugin for software rendering)
 def _libreoffice_env(profile_dir: str) -> dict:
     return {
         **os.environ,
@@ -75,7 +75,13 @@ def _resolve_soffice() -> str:
     return "soffice"  # fallback; will raise FileNotFoundError if missing
 
 
+def _resolve_xvfb_run() -> str | None:
+    """Resolve xvfb-run for virtual display (fixes 'Can't open display' in containers)."""
+    return shutil.which("xvfb-run")
+
+
 _SOFFICE_CMD: str | None = None
+_XVFB_RUN: str | None = None
 
 
 def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None = None) -> str:
@@ -83,10 +89,11 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None
     Convert DOCX to PDF using LibreOffice headless.
     Uses a unique profile dir per conversion to avoid lock conflicts in batch processing.
     """
-    global _SOFFICE_CMD
+    global _SOFFICE_CMD, _XVFB_RUN
     if _SOFFICE_CMD is None:
         _SOFFICE_CMD = _resolve_soffice()
-        logger.info(f"Using LibreOffice: {_SOFFICE_CMD}")
+        _XVFB_RUN = _resolve_xvfb_run()
+        logger.info(f"Using LibreOffice: {_SOFFICE_CMD}, xvfb: {_XVFB_RUN or 'no'}")
 
     base_name = os.path.basename(docx_path).replace(".docx", ".pdf")
     expected_path = os.path.join(output_dir, base_name)
@@ -101,20 +108,23 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None
     # LibreOffice often ignores --outdir when it differs from source dir; use docx_dir for reliable output
     outdir_for_lo = docx_dir
 
+    soffice_args = [
+        _SOFFICE_CMD,
+        "--headless",
+        "--norestore",
+        f"-env:UserInstallation=file://{prof}",
+        "--convert-to",
+        "pdf",
+        "--outdir",
+        outdir_for_lo,
+        docx_path_abs,
+    ]
+    cmd = ([_XVFB_RUN, "-a"] + soffice_args) if _XVFB_RUN else soffice_args
+
     try:
         t0 = time.perf_counter()
         result = subprocess.run(
-            [
-                _SOFFICE_CMD,
-                "--headless",
-                "--norestore",
-                f"-env:UserInstallation=file://{prof}",
-                "--convert-to",
-                "pdf",
-                "--outdir",
-                outdir_for_lo,
-                docx_path_abs,
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=120,
@@ -296,10 +306,12 @@ async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="DO
 async def startup_validation():
     """Verify LibreOffice is available before accepting requests."""
     try:
-        cmd = _resolve_soffice()
-        logger.info(f"Resolved LibreOffice cmd: {cmd}")
+        soffice = _resolve_soffice()
+        xvfb = _resolve_xvfb_run()
+        logger.info(f"Resolved LibreOffice: {soffice}, xvfb: {xvfb or 'no'}")
+        cmd = ([xvfb, "-a", soffice] if xvfb else [soffice]) + ["--headless", "--version"]
         r = subprocess.run(
-            [cmd, "--headless", "--version"],
+            cmd,
             capture_output=True,
             text=True,
             timeout=10,
@@ -307,7 +319,7 @@ async def startup_validation():
         )
         if r.returncode == 0:
             version_out = (r.stdout or r.stderr or "").strip()
-            logger.info(f"LibreOffice OK: {cmd} | {version_out}")
+            logger.info(f"LibreOffice OK: {soffice} | {version_out}")
         else:
             logger.warning(
                 f"LibreOffice version check returned {r.returncode}. stdout: {r.stdout}. stderr: {r.stderr}"
