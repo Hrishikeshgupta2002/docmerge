@@ -34,23 +34,34 @@ from main import convert_docx_to_pdf, merge_pdfs
 logger = logging.getLogger(__name__)
 
 
-def merge_docx_to_pdf(docx_paths: list, output_path: str) -> None:
+def merge_to_pdf(file_paths: list, output_path: str) -> None:
     """
-    Convert DOCX files to PDF via LibreOffice and merge into one PDF.
-    Shared logic for CLI and API. Preserves full formatting.
+    Convert DOCX to PDF (via LibreOffice) and merge with any input PDFs into one PDF.
+    PDF inputs are used as-is; DOCX are converted then merged. Preserves order.
+    Shared logic for CLI and API.
     """
-    if len(docx_paths) < 2:
-        raise ValueError("Need at least 2 DOCX files to merge")
+    if len(file_paths) < 2:
+        raise ValueError("Need at least 2 files to merge")
     temp_dir = tempfile.mkdtemp(prefix="docmerge_pdf_")
     pdf_files = []
     try:
-        for idx, docx_path in enumerate(docx_paths, start=1):
-            logger.info(f"Converting {idx}/{len(docx_paths)}: {os.path.basename(docx_path)}")
-            pdf_path = convert_docx_to_pdf(docx_path, temp_dir)
-            pdf_files.append(pdf_path)
+        for idx, path in enumerate(file_paths, start=1):
+            name = os.path.basename(path)
+            if name.lower().endswith(".pdf"):
+                logger.info(f"Including {idx}/{len(file_paths)} (PDF): {name}")
+                pdf_files.append(path)
+            else:
+                logger.info(f"Converting {idx}/{len(file_paths)} (DOCX): {name}")
+                pdf_path = convert_docx_to_pdf(path, temp_dir)
+                pdf_files.append(pdf_path)
         merge_pdfs(pdf_files, output_path)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def merge_docx_to_pdf(docx_paths: list, output_path: str) -> None:
+    """Backward-compat wrapper: convert DOCX only and merge."""
+    merge_to_pdf(docx_paths, output_path)
 
 
 def main():

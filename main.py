@@ -25,7 +25,7 @@ app = FastAPI(
     description="""
     Convert DOCX files to PDF and merge into a single PDF document.
 
-    * `POST /merge-pdf/` - Upload DOCX files, get merged PDF (LibreOffice + pypdf)
+    * `POST /merge-pdf/` - Upload DOCX and/or PDF files, get merged PDF (LibreOffice + pypdf)
     """,
     version="1.0.0",
     servers=[
@@ -45,11 +45,11 @@ app.add_middleware(
 )
 
 
-def validate_docx_file(file: UploadFile):
-    """Validate that the uploaded file is a DOCX file."""
+def validate_merge_file(file: UploadFile):
+    """Validate that the uploaded file is DOCX or PDF."""
     filename_lower = (file.filename or "").lower()
-    if not filename_lower.endswith(".docx"):
-        raise HTTPException(status_code=400, detail="Only DOCX files are allowed")
+    if not (filename_lower.endswith(".docx") or filename_lower.endswith(".pdf")):
+        raise HTTPException(status_code=400, detail="Only DOCX and PDF files are allowed")
 
 
 # LibreOffice headless env (no X11 display, gen plugin for software rendering)
@@ -215,16 +215,16 @@ def merge_pdfs(pdf_paths: List[str], output_path: str):
 
 @app.post("/merge-pdf/",
           summary="Convert DOCX to PDF and merge",
-          description="Upload DOCX files. Each is converted to PDF via LibreOffice, then merged into one PDF.")
-async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="DOCX files")):
-    """Convert DOCX files to PDF and merge into a single PDF."""
+          description="Upload DOCX and/or PDF files. DOCX converted via LibreOffice; PDFs merged as-is.")
+async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="DOCX and/or PDF files")):
+    """Convert DOCX to PDF (where needed) and merge all into a single PDF."""
     if len(files) < 2:
         raise HTTPException(status_code=400, detail="At least 2 files required")
     if len(files) > 40:
         raise HTTPException(status_code=400, detail="Maximum 40 files allowed")
 
     for f in files:
-        validate_docx_file(f)
+        validate_merge_file(f)
 
     temp_dir = None
     output_dir = None
@@ -238,14 +238,17 @@ async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="DO
         for file in files:
             content = await file.read()
             total_bytes += len(content)
-            if (file.filename or "").lower().split(".")[-1] != "docx":
-                raise HTTPException(status_code=400, detail="Only DOCX supported")
-            path = os.path.join(temp_dir, f"doc_{len(temp_files)}.docx")
+            ext = (file.filename or "").lower().split(".")[-1]
+            if ext not in ("docx", "pdf"):
+                raise HTTPException(status_code=400, detail="Only DOCX and PDF supported")
+            path = os.path.join(temp_dir, f"doc_{len(temp_files)}.{ext}")
             with open(path, "wb") as f:
                 f.write(content)
             temp_files.append(path)
 
-        logger.info(f"Received {len(files)} DOCX files, {total_bytes} bytes total. temp_dir={temp_dir}")
+        docx_count = sum(1 for p in temp_files if p.lower().endswith(".docx"))
+        pdf_count = len(temp_files) - docx_count
+        logger.info(f"Received {len(files)} files ({docx_count} DOCX, {pdf_count} PDF), {total_bytes} bytes. temp_dir={temp_dir}")
 
         # Output in separate dir to avoid collision with LibreOffice temp PDFs in docx dir
         output_dir = mkdtemp(prefix="docmerge_out_")
@@ -253,11 +256,11 @@ async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="DO
         output_file.close()
         temp_files.append(output_file.name)
 
-        from merge_as_pdf import merge_docx_to_pdf
+        from merge_as_pdf import merge_to_pdf
 
         t0 = time.perf_counter()
-        logger.info(f"Converting {len(temp_files)-1} DOCX to PDF and merging...")
-        merge_docx_to_pdf(temp_files[:-1], output_file.name)
+        logger.info(f"Converting DOCX and merging {len(temp_files)-1} files...")
+        merge_to_pdf(temp_files[:-1], output_file.name)
         elapsed = time.perf_counter() - t0
         logger.info(f"Merge complete in {elapsed:.2f}s")
 
@@ -342,6 +345,6 @@ async def api_info():
     return {
         "title": "DocMerge API",
         "version": "1.0.0",
-        "endpoint": "POST /merge-pdf/ - Upload DOCX files, get merged PDF",
+        "endpoint": "POST /merge-pdf/ - Upload DOCX and/or PDF files, get merged PDF",
         "requirements": "LibreOffice (included in Docker image)",
     }
