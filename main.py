@@ -146,6 +146,39 @@ def validate_document_structure(doc: Document, filename: str) -> bool:
         )
 
 
+def normalize_docx_via_libreoffice(docx_path: str, output_dir: str) -> str:
+    """
+    Normalize DOCX via LibreOffice re-save. Fixes fragmented runs / malformed XML
+    (like "open in Word and save"). Lightweight compared to PDF conversion.
+    
+    Set NORMALIZE_DOCX_BEFORE_MERGE=1 to enable. Recommended with 1GB+ RAM.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "libreoffice",
+                "--headless",
+                "--convert-to",
+                "docx",
+                docx_path,
+                "--outdir",
+                output_dir
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=60  # DOCX→DOCX is lighter than DOCX→PDF
+        )
+        normalized_path = os.path.join(output_dir, os.path.basename(docx_path))
+        if not os.path.exists(normalized_path):
+            raise Exception("Normalized DOCX was not generated after LibreOffice conversion")
+        return normalized_path
+    except subprocess.TimeoutExpired:
+        raise Exception(f"DOCX normalization timed out: {os.path.basename(docx_path)}")
+    except subprocess.CalledProcessError as e:
+        raise Exception(f"DOCX normalization failed: {str(e)}")
+
+
 def convert_docx_to_pdf(docx_path: str, output_dir: str) -> str:
     """
     Convert DOCX to PDF using LibreOffice headless.
@@ -263,101 +296,67 @@ def is_protected_content(text: str) -> bool:
 def smart_word_split(text: str) -> str:
     """
     Intelligently split merged words using regex and dictionary-based segmentation.
-    Production-hardened approach that handles CamelCase, acronyms, and long merged words.
-    
-    Args:
-        text: Text string to fix
-        
-    Returns:
-        Fixed text with proper spacing
+    Handles OOXML run concatenation: CamelCase, letters+numbers, punctuation, and
+    lowercase/mixed-case merged words (e.g. Ourcompanyheadquarters, islocatedat).
     """
     if not text:
         return text
-    
-    # Skip protected content (URLs, emails, codes)
+
     if is_protected_content(text):
         return text
-    
-    # Performance optimization: Skip wordninja if no long lowercase sequences exist
-    # This prevents running expensive segmentation on normal paragraphs
-    if not re.search(r'[a-z]{10,}', text):
-        # Still apply basic fixes even if no long sequences
-        # Step 1: Fix CamelCase (only if suspicious pattern exists)
-        if re.search(r'[a-z]{6,}[A-Z]', text):
-            text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-            text = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', text)
-        
-        # Step 2: Add space between letters and numbers
-        text = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', text)
-        text = re.sub(r'(\d)([a-zA-Z])', r'\1 \2', text)
-        
-        # Step 3: Fix punctuation spacing
-        text = re.sub(r',([A-Za-z])', r', \1', text)
-        text = re.sub(r'\.([A-Za-z])', r'. \1', text)
-        
-        # Normalize whitespace
-        text = re.sub(r'\s{2,}', ' ', text)
-        return text.strip()
-    
-    # Step 1: Fix CamelCase (only if suspicious pattern exists)
-    # Only fix if there's 6+ lowercase followed by uppercase (avoids false positives)
-    if re.search(r'[a-z]{6,}[A-Z]', text):
-        # Split lowercase-to-uppercase transitions
-        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-        # Split acronym-to-word transitions (e.g., "APPDto" -> "APPD to")
-        text = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', text)
-    
-    # Step 2: Add space between letters and numbers
+
+    # Step 1: Fix punctuation spacing (before wordninja so "Suite830,Shelton" splits correctly)
+    text = re.sub(r',([A-Za-z0-9])', r', \1', text)
+    text = re.sub(r'\.([A-Za-z0-9])', r'. \1', text)
+    text = re.sub(r';([A-Za-z0-9])', r'; \1', text)
+    text = re.sub(r':([A-Za-z0-9])', r': \1', text)
+
+    # Step 2: Add space between letters and numbers (Suite830 -> Suite 830, 6Corporate -> 6 Corporate)
     text = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', text)
     text = re.sub(r'(\d)([a-zA-Z])', r'\1 \2', text)
-    
-    # Step 3: Fix punctuation spacing
-    text = re.sub(r',([A-Za-z])', r', \1', text)
-    text = re.sub(r'\.([A-Za-z])', r'. \1', text)
-    
-    # Step 4: Split long lowercase merged words using wordninja
-    # Only process words longer than 18 characters to avoid false positives on legitimate compound words
+
+    # Step 3: Fix CamelCase
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    text = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', text)
+
+    # Step 4: Split merged lowercase/mixed-case words using wordninja
+    # Threshold 10 chars catches: islocatedat, wehavemultiple, foraperiod, etc.
     words = text.split()
     processed_words = []
-    
+
     for word in words:
-        # Remove trailing punctuation for processing, then add it back
+        leading_punct = ""
         trailing_punct = ""
-        if word and word[-1] in [',', '.', ';', ':', '!', '?', ')', ']', '}']:
-            trailing_punct = word[-1]
-            word_clean = word[:-1]
-        else:
-            word_clean = word
-        
-        # Only split if word is long (18+ chars), all lowercase, alphabetic, and not a URL
+        while word and word[0] in ['(', '[', '{', '"', "'"]:
+            leading_punct += word[0]
+            word = word[1:]
+        while word and word[-1] in [',', '.', ';', ':', '!', '?', ')', ']', '}', '"', "'"]:
+            trailing_punct = word[-1] + trailing_punct
+            word = word[:-1]
+
+        # Split if: 10+ chars, alphabetic, not URL; allow mixed case (Ourcompanyheadquarters)
         if (
-            len(word_clean) > 18 and
-            word_clean.islower() and
-            word_clean.isalpha() and
-            not word_clean.startswith(("http", "www"))
+            len(word) >= 10
+            and word.replace("'", "").replace("-", "").isalpha()
+            and not word.lower().startswith(("http", "www"))
         ):
             try:
-                # Use wordninja to intelligently split the word
-                split_words = wordninja.split(word_clean)
-                if split_words:
-                    processed_words.append(" ".join(split_words) + trailing_punct)
+                split_words = wordninja.split(word.lower())
+                if split_words and len(split_words) > 1:
+                    result = " ".join(split_words)
+                    if word[0].isupper():
+                        result = result[0].upper() + result[1:]
+                    processed_words.append(leading_punct + result + trailing_punct)
                 else:
-                    processed_words.append(word)
+                    processed_words.append(leading_punct + word + trailing_punct)
             except Exception:
-                # If wordninja fails, keep original word
-                processed_words.append(word)
+                processed_words.append(leading_punct + word + trailing_punct)
         else:
-            processed_words.append(word)
-    
+            processed_words.append(leading_punct + word + trailing_punct)
+
     text = " ".join(processed_words)
-    
-    # Step 5: Remove double spaces and normalize whitespace
     text = re.sub(r'\s{2,}', ' ', text)
-    
-    # Step 6: Trim spaces
-    text = text.strip()
-    
-    return text
+    return text.strip()
 
 
 def normalize_text_spacing(doc: Document):
@@ -485,8 +484,14 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
     docx_files = []
     temp_files = []  # Track all temporary files for cleanup
     output_file = None
+    temp_dir = None
+    normalize_before_merge = os.getenv("NORMALIZE_DOCX_BEFORE_MERGE", "1") == "1"
+    if normalize_before_merge:
+        logger.info("NORMALIZE_DOCX_BEFORE_MERGE=1: Pre-normalizing DOCX via LibreOffice before merge")
 
     try:
+        temp_dir = mkdtemp()
+
         # Save all DOCX files temporarily for Composer
         for file in files:
             content = await file.read()
@@ -495,12 +500,22 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
             if file_extension != 'docx':
                 raise HTTPException(status_code=400, detail=f"Only DOCX files are supported. Received: {file_extension}")
 
-            # Save DOCX file temporarily for Composer
-            temp_file = NamedTemporaryFile(delete=False, suffix=".docx")
-            temp_file.write(content)
-            temp_file.close()
-            temp_files.append(temp_file.name)
-            docx_files.append(temp_file.name)
+            temp_path = os.path.join(temp_dir, f"doc_{len(docx_files)}.docx")
+            with open(temp_path, "wb") as f:
+                f.write(content)
+            temp_files.append(temp_path)
+
+            # Optional: Normalize via LibreOffice (fixes fragmented runs like "resave in Word")
+            if normalize_before_merge:
+                try:
+                    normalized_path = normalize_docx_via_libreoffice(temp_path, temp_dir)
+                    docx_files.append(normalized_path)
+                    logger.debug(f"Normalized and added: {file.filename}")
+                except Exception as e:
+                    logger.warning(f"LibreOffice normalize failed for {file.filename}, using original: {e}")
+                    docx_files.append(temp_path)
+            else:
+                docx_files.append(temp_path)
             logger.debug(f"Added DOCX file: {file.filename}")
 
         # Merge DOCX files using Composer (preserves formatting, headers, footers, etc.)
@@ -630,12 +645,18 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
         with open(output_file.name, 'rb') as f:
             content = f.read()
 
-        # Clean up temporary files early to free resources
+        # Clean up temporary files and directory
         for temp_path in temp_files:
             try:
-                os.unlink(temp_path)
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
             except OSError:
-                pass  # Ignore errors when deleting temp files
+                pass
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except OSError:
+                pass
 
         if output_file and os.path.exists(output_file.name):
             try:
@@ -677,7 +698,12 @@ async def merge_files(files: List[UploadFile] = File(..., description="List of D
                 if os.path.exists(temp_path):
                     os.unlink(temp_path)
             except OSError:
-                pass  # Ignore errors when deleting temp files
+                pass
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except OSError:
+                pass
 
         if output_file and os.path.exists(output_file.name):
             try:
