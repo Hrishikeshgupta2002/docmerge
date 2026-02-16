@@ -133,6 +133,25 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None
                 logger.debug(f"PDF found at {candidate}")
                 return candidate
 
+        # LibreOffice sometimes writes tmpXXX.pdf and ignores --outdir; find most recent PDF
+        if result.returncode == 0:
+            search_dirs = (output_dir, docx_dir, prof)
+            newest_pdf: str | None = None
+            newest_mtime = 0.0
+            for d in search_dirs:
+                if not os.path.isdir(d):
+                    continue
+                for f in os.listdir(d):
+                    if f.lower().endswith(".pdf"):
+                        p = os.path.join(d, f)
+                        mtime = os.path.getmtime(p)
+                        if mtime > newest_mtime:
+                            newest_mtime = mtime
+                            newest_pdf = p
+            if newest_pdf:
+                logger.info(f"Using LibreOffice output (non-standard name): {newest_pdf}")
+                return newest_pdf
+
         logger.error(f"PDF not found. Checked: {candidates}")
         for d in (output_dir, docx_dir, prof):
             if os.path.isdir(d):
