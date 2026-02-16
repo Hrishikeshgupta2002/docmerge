@@ -6,6 +6,7 @@ Single endpoint: POST /merge-pdf/
 import os
 import shutil
 import subprocess
+import time
 from tempfile import NamedTemporaryFile, mkdtemp
 from typing import List
 import logging
@@ -15,7 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pypdf import PdfMerger
 
-logging.basicConfig(level=logging.INFO)
+_log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(level=_log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -93,7 +95,10 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None
     # Unique profile per conversion: avoids profile locks when processing many files
     prof = profile_dir or mkdtemp(prefix="lo_profile_")
     env = _libreoffice_env(prof)
+    logger.debug(f"Converting {docx_path} -> {expected_path}, profile={prof}")
+
     try:
+        t0 = time.perf_counter()
         result = subprocess.run(
             [
                 _SOFFICE_CMD,
@@ -112,24 +117,30 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None
             env=env,
             cwd=output_dir,
         )
+        elapsed = time.perf_counter() - t0
+        logger.info(f"LibreOffice conversion {base_name}: returncode={result.returncode}, elapsed={elapsed:.2f}s")
+
         if result.returncode != 0:
             stderr_full = (result.stderr or "").strip()
             stdout_full = (result.stdout or "").strip()
             logger.warning(
-                f"LibreOffice exit {result.returncode} for {base_name}. stderr: {stderr_full[:800]} | stdout: {stdout_full[:300]}"
+                f"LibreOffice exit {result.returncode} for {base_name}. stderr: {stderr_full} | stdout: {stdout_full}"
             )
 
-        for candidate in (expected_path, os.path.join(docx_dir, base_name), os.path.join(prof, base_name)):
+        candidates = [expected_path, os.path.join(docx_dir, base_name), os.path.join(prof, base_name)]
+        for candidate in candidates:
             if os.path.exists(candidate):
+                logger.debug(f"PDF found at {candidate}")
                 return candidate
 
+        logger.error(f"PDF not found. Checked: {candidates}")
         for d in (output_dir, docx_dir, prof):
             if os.path.isdir(d):
                 contents = os.listdir(d)
+                logger.error(f"Contents of {d}: {contents}")
                 pdfs = [f for f in contents if f.lower().endswith(".pdf")]
                 if pdfs:
                     logger.warning(f"LibreOffice created {pdfs} in {d}, expected {base_name}")
-                break
         raise Exception(f"PDF was not generated for {os.path.basename(docx_path)}")
     except subprocess.TimeoutExpired:
         raise Exception(f"Conversion timed out: {os.path.basename(docx_path)}")
@@ -140,6 +151,7 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str, profile_dir: str | None
 
 def merge_pdfs(pdf_paths: List[str], output_path: str):
     """Merge PDF files using pypdf (streaming, low memory)."""
+    logger.info(f"Merging {len(pdf_paths)} PDFs -> {output_path}")
     merger = PdfMerger()
     try:
         for p in pdf_paths:
@@ -148,6 +160,8 @@ def merge_pdfs(pdf_paths: List[str], output_path: str):
             merger.append(p)
         with open(output_path, "wb") as f:
             merger.write(f)
+        size = os.path.getsize(output_path)
+        logger.info(f"Merged PDF size: {size} bytes")
     finally:
         merger.close()
 
@@ -171,9 +185,11 @@ async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="DO
 
     try:
         temp_dir = mkdtemp()
+        total_bytes = 0
 
         for file in files:
             content = await file.read()
+            total_bytes += len(content)
             if (file.filename or "").lower().split(".")[-1] != "docx":
                 raise HTTPException(status_code=400, detail="Only DOCX supported")
             path = os.path.join(temp_dir, f"doc_{len(temp_files)}.docx")
@@ -181,14 +197,19 @@ async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="DO
                 f.write(content)
             temp_files.append(path)
 
+        logger.info(f"Received {len(files)} DOCX files, {total_bytes} bytes total. temp_dir={temp_dir}")
+
         output_file = NamedTemporaryFile(delete=False, suffix=".pdf", dir=temp_dir)
         output_file.close()
         temp_files.append(output_file.name)
 
         from merge_as_pdf import merge_docx_to_pdf
+
+        t0 = time.perf_counter()
         logger.info(f"Converting {len(temp_files)-1} DOCX to PDF and merging...")
         merge_docx_to_pdf(temp_files[:-1], output_file.name)
-        logger.info("Merge complete")
+        elapsed = time.perf_counter() - t0
+        logger.info(f"Merge complete in {elapsed:.2f}s")
 
         with open(output_file.name, "rb") as f:
             content = f.read()
@@ -215,7 +236,7 @@ async def merge_files_as_pdf(files: List[UploadFile] = File(..., description="DO
         raise
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"PDF merge error: {error_msg}")
+        logger.error(f"PDF merge error: {error_msg}", exc_info=True)
         for p in temp_files:
             try:
                 if os.path.exists(p):
@@ -232,6 +253,7 @@ async def startup_validation():
     """Verify LibreOffice is available before accepting requests."""
     try:
         cmd = _resolve_soffice()
+        logger.info(f"Resolved LibreOffice cmd: {cmd}")
         r = subprocess.run(
             [cmd, "--headless", "--version"],
             capture_output=True,
@@ -240,13 +262,16 @@ async def startup_validation():
             env={**os.environ, "SAL_USE_VCLPLUGIN": "gen", "HOME": "/tmp", "XDG_RUNTIME_DIR": "/tmp"},
         )
         if r.returncode == 0:
-            logger.info(f"LibreOffice OK: {cmd}")
+            version_out = (r.stdout or r.stderr or "").strip()
+            logger.info(f"LibreOffice OK: {cmd} | {version_out}")
         else:
-            logger.warning(f"LibreOffice version check returned {r.returncode}: {r.stderr[:200]}")
+            logger.warning(
+                f"LibreOffice version check returned {r.returncode}. stdout: {r.stdout}. stderr: {r.stderr}"
+            )
     except FileNotFoundError:
         logger.error("LibreOffice/soffice not found in PATH")
     except Exception as e:
-        logger.warning(f"LibreOffice startup check: {e}")
+        logger.warning(f"LibreOffice startup check: {e}", exc_info=True)
 
 
 @app.get("/")

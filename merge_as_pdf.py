@@ -17,6 +17,7 @@ Or with venv:
 API: POST /merge-pdf/ (same logic, accepts uploaded DOCX files)
 """
 import argparse
+import logging
 import os
 import shutil
 import sys
@@ -30,6 +31,8 @@ os.chdir(_script_dir)
 
 from main import convert_docx_to_pdf, merge_pdfs
 
+logger = logging.getLogger(__name__)
+
 
 def merge_docx_to_pdf(docx_paths: list, output_path: str) -> None:
     """
@@ -41,7 +44,8 @@ def merge_docx_to_pdf(docx_paths: list, output_path: str) -> None:
     temp_dir = tempfile.mkdtemp(prefix="docmerge_pdf_")
     pdf_files = []
     try:
-        for docx_path in docx_paths:
+        for idx, docx_path in enumerate(docx_paths, start=1):
+            logger.info(f"Converting {idx}/{len(docx_paths)}: {os.path.basename(docx_path)}")
             pdf_path = convert_docx_to_pdf(docx_path, temp_dir)
             pdf_files.append(pdf_path)
         merge_pdfs(pdf_files, output_path)
