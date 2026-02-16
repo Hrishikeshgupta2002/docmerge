@@ -12,12 +12,13 @@ ENV PYTHONUNBUFFERED=1 \
     XDG_RUNTIME_DIR=/tmp \
     SAL_USE_VCLPLUGIN=gen
 
-# Install LibreOffice, xvfb (virtual display), and fonts for DOCX→PDF conversion
+# Install LibreOffice, xvfb (virtual display), xauth (required by xvfb-run), and fonts for DOCX→PDF conversion
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         libreoffice \
         libreoffice-writer \
         xvfb \
+        xauth \
         fonts-crosextra-carlito \
         fonts-crosextra-caladea && \
     apt-get clean && \
